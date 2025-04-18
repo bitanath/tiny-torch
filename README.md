@@ -1,3 +1,19 @@
+## Fork of JS-Pytorch to introduce and support additional ops like rnns, argmax, conv etc
+Below is more justification and logic of why this fork is necessary
+
+### Why do this? 
+- Support additional torch layers not included in the original
+- Provide a 1 to 1 API for common models to train in Python (Pytorch-CUDA built) and inference in pure JS
+- Tiny models for extremely fast inference in a serverless/embedded client environment
+
+### What is supported?
+- Only a simple RNN is created as of now. I tried transformers (preformance not good for smaller param transformers) and LSTM (too complex without perf gain)
+- Inference in pure JS for use in embedded systems. The idea is to support tiny classifiers/predictors < 1 MB model + weights
+- This initial data can then be used to provide more context to a full fledged RNN
+
+## Original README.md below
+
+
 <p align="center">
   <img src="./assets/docs_logo.png" alt="js-torch" height="135">
 </p>
