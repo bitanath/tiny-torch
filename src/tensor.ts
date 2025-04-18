@@ -1,4 +1,4 @@
-﻿import { getShape, getData, assureArray } from "./utils";
+﻿import { getShape, getData, assureArray } from "./utils.js";
 
 // <<< Tensor class, holds n-dimensional tensors, and multiple useful methods >>> //
 
@@ -27,7 +27,11 @@ export class Tensor {
    * @param {boolean} requires_grad - Whether to keep track of this tensor's gradients.
    * @param {string} device - Device to store Tensor. Either "gpu" or "cpu".
    */
-  constructor(data: Array<any> | number, requires_grad = false, device = 'cpu') {
+  constructor(
+    data: Array<any> | number,
+    requires_grad = false,
+    device = "cpu"
+  ) {
     if (typeof data === "object") {
       this._data = data;
     } else if (typeof data === "number") {
@@ -165,12 +169,132 @@ export class Tensor {
   }
 
   /**
+   * Returns a single element tensor into a js number
+   */
+  item() {
+    if (this._data.length !== 1) {
+      throw new Error('item() can only be called on tensors with a single element');
+    }
+    
+    return this._data[0];
+  }
+
+  /**
+   * Removes dimensions of size 1 from the tensor.
+   * 
+   * @param dim Optional dimension to squeeze. If specified, only squeezes the dimension if it's 1.
+   * If not specified, squeezes all dimensions of size 1.
+   * @returns A new tensor with selected dimensions of size 1 removed
+   */
+  squeeze(dim?: number) {
+    const newShape = [...this.shape];
+    
+    if (dim !== undefined) {
+      const actualDim = dim < 0 ? this.shape.length + dim : dim;
+      
+      if (actualDim < 0 || actualDim >= this.shape.length) {
+        throw new Error(`Dimension out of range (expected to be in range of [${-this.shape.length}, ${this.shape.length-1}], but got ${dim})`);
+      }
+      if (this.shape[actualDim] === 1) {
+        newShape.splice(actualDim, 1);
+      }
+    } else {
+      for (let i = newShape.length - 1; i >= 0; i--) {
+        if (newShape[i] === 1) {
+          newShape.splice(i, 1);
+        }
+      }
+    }
+
+    const newTensor = new Tensor([...this._data], this.requires_grad, this.device);
+    newTensor.shape = newShape;
+    
+    return newTensor;
+  }
+
+  /**
+   * Returns a new tensor with a dimension of size one inserted at the specified position.
+   * 
+   * @param dim The index at which to insert the singleton dimension
+   * @returns A new tensor with an additional dimension
+   */
+  unsqueeze(dim: number) {
+    const newShape = [...this.shape];
+    
+    const actualDim = dim < 0 ? this.shape.length + dim + 1 : dim;
+    
+    if (actualDim < 0 || actualDim > this.shape.length) {
+      throw new Error(`Dimension out of range (expected to be in range of [${-this.shape.length-1}, ${this.shape.length}], but got ${dim})`);
+    }
+
+    newShape.splice(actualDim, 0, 1);
+
+    const newTensor = new Tensor([...this._data], this.requires_grad, this.device);
+    newTensor.shape = newShape;
+    
+    return newTensor;
+  }
+
+  slice(indices: (number | null)[]): Tensor {
+    function extractSlice(data: any, currentDim: number): any {
+      if (!Array.isArray(data) || currentDim >= indices.length) {
+        return data;
+      }
+      
+      const index = indices[currentDim];
+      
+      if (index === null) {
+        return data.map((item: any) => extractSlice(item, currentDim + 1));
+      } else {
+        return extractSlice(data[index], currentDim + 1);
+      }
+    }
+    
+    const slicedData = extractSlice(this._data, 0);
+    return new Tensor(slicedData, this.requires_grad, this.device);
+  }
+
+  setSlice(indices: (number | null)[], value: Tensor | number): Tensor {
+    function setSliceValues(data: any, valueData: any, currentDim: number): void {
+      if (!Array.isArray(data) || currentDim >= indices.length) {
+        return;
+      }
+      
+      const index = indices[currentDim];
+      
+      if (index === null) {
+        for (let i = 0; i < data.length; i++) {
+          const nextValueData = Array.isArray(valueData) && valueData.length > i ? valueData[i] : valueData;
+          if (currentDim === indices.length - 1) {
+            data[i] = Array.isArray(nextValueData) ? [...nextValueData] : nextValueData;
+          } else {
+            setSliceValues(data[i], nextValueData, currentDim + 1);
+          }
+        }
+      } else {
+        if (currentDim === indices.length - 1) {
+          data[index] = Array.isArray(valueData) ? [...valueData] : valueData;
+        } else {
+          // Otherwise continue recursion
+          setSliceValues(data[index], valueData, currentDim + 1);
+        }
+      }
+    }
+    
+    const valueData = value instanceof Tensor ? value._data : value;
+    setSliceValues(this._data, valueData, 0);
+    
+    return this;
+  }
+  
+
+  /**
    * Gets the sum of the Tensor over a specified dimension.
    * @param {number} dim - Dimension to sum over.
    * @param {boolean} keepdims - Whether to keep dimensions of original tensor.
    * @returns {Tensor} - Final tensor.
    */
-  sum(dim = -1, keepdims = false) {
+  sum(dim: number = -1, keepdims: boolean = false): Tensor {
     const operation = new Sum();
     return operation.forward(this, dim, keepdims);
   }
@@ -181,7 +305,7 @@ export class Tensor {
    * @param {boolean} keepdims - Whether to keep dimensions of original tensor.
    * @returns {Tensor} - Final tensor.
    */
-  mean(dim = -1, keepdims = false) {
+  mean(dim: number = -1, keepdims: boolean = false): Tensor {
     const operation = new Mean();
     return operation.forward(this, dim, keepdims);
   }
@@ -192,7 +316,7 @@ export class Tensor {
    * @param {boolean} keepdims - Whether to keep dimensions of original tensor.
    * @returns {Tensor} - Final tensor.
    */
-  variance(dim = -1, keepdims = false) {
+  variance(dim: number = -1, keepdims: boolean = false): Tensor {
     const operation = new Variance();
     return operation.forward(this, dim, keepdims);
   }
@@ -268,32 +392,51 @@ export class Tensor {
     if (other.forwardKernel === null || other.batch_size != this.shape.at(-2)) {
       if (device === "gpu") {
         // Get GPU from GPU.js:
-        const {GPU} = require('@eduardoleao052/gpu');
+        const { GPU } = require("@eduardoleao052/gpu");
         // If the batch size changed, warn user and update the batch size:
-        if (other.batch_size != null){
+        if (other.batch_size != null) {
           other.batch_size = other.shape.at(-2);
           if (other.warned === false) {
-            console.warn('Testing batch size different from training batch size. JS-PyTorch recreating GPU Kernel (Less efficient)')
+            console.warn(
+              "Testing batch size different from training batch size. JS-PyTorch recreating GPU Kernel (Less efficient)"
+            );
             other.warned = true;
           }
         }
         other.gpu = new GPU();
         // Define Kernel function for matmul:
-        const kernelFunc = function(this: any, a: number[][], b: number[][], len: number): number {
+        const kernelFunc = function (
+          this: any,
+          a: number[][],
+          b: number[][],
+          len: number
+        ): number {
           let sum = 0;
           for (let i = 0; i < len; i++) {
             sum += a[this.thread.y][i] * b[i][this.thread.x];
           }
           return sum;
-        }
+        };
         // Create and store the GPU kernels:
-        other.forwardKernel = other.gpu.createKernel(kernelFunc, { loopMaxIterations: other.shape.at(-2) }).setOutput([other.shape.at(-1), this.shape.at(-2)]);
-        other.backwardKernelA = other.gpu.createKernel(kernelFunc, { loopMaxIterations: other.shape.at(-1) }).setOutput([this.shape.at(-1), this.shape.at(-2)]);
-        other.backwardKernelB = other.gpu.createKernel(kernelFunc, { loopMaxIterations: this.shape.at(-2) }).setOutput([other.shape.at(-1), other.shape.at(-2)]);
+        other.forwardKernel = other.gpu
+          .createKernel(kernelFunc, { loopMaxIterations: other.shape.at(-2) })
+          .setOutput([other.shape.at(-1), this.shape.at(-2)]);
+        other.backwardKernelA = other.gpu
+          .createKernel(kernelFunc, { loopMaxIterations: other.shape.at(-1) })
+          .setOutput([this.shape.at(-1), this.shape.at(-2)]);
+        other.backwardKernelB = other.gpu
+          .createKernel(kernelFunc, { loopMaxIterations: this.shape.at(-2) })
+          .setOutput([other.shape.at(-1), other.shape.at(-2)]);
       } else {
         // Build the CPU kernel:
-        const kernelFunc = function (a: number[][], b: number[][], len: number) {
-          const out = Array(a.length).fill(0).map(() => Array(b[0].length).fill(0));
+        const kernelFunc = function (
+          a: number[][],
+          b: number[][],
+          len: number
+        ) {
+          const out = Array(a.length)
+            .fill(0)
+            .map(() => Array(b[0].length).fill(0));
           for (let i = 0; i < a.length; i++) {
             for (let j = 0; j < b[0].length; j++) {
               let currentIndex = 0;
@@ -304,7 +447,7 @@ export class Tensor {
             }
           }
           return out;
-        }
+        };
         // Store the CPU kernels:
         other.forwardKernel = kernelFunc;
         other.backwardKernelA = kernelFunc;
@@ -417,6 +560,28 @@ export class Tensor {
   reshape(shape: Array<number>) {
     const operation = new Reshape();
     return operation.forward(this, shape);
+  }
+
+  //TODO: Utility functions for Conv2D / MaxPool from the MR by TaylorHawkes bd9f840574ba1564919b27685f2427de4c688ab2
+  img2col(
+    kernel_height: number,
+    kernel_width: number,
+    stride: [number, number],
+    padding: [number, number]
+  ): Tensor {
+    const operation = new Img2Col();
+    return operation.forward(
+      this,
+      kernel_height,
+      kernel_width,
+      stride,
+      padding
+    );
+  }
+
+  maxpool(kernel_size: [number, number], stride: [number, number]): Tensor {
+    const operation = new MaxPool();
+    return operation.forward(this, kernel_size, stride);
   }
 }
 
@@ -662,7 +827,7 @@ class MatMul {
     this.cache = [a, b];
     let aData = a.data;
     let bData = b.data;
-    
+
     if (a.shape.length < b.shape.length) {
       aData = broadcastUp(aData, bData);
     } else {
@@ -1237,6 +1402,255 @@ export class Reshape {
   }
 }
 
+export class MaxPool {
+  cache: any;
+
+  forward(
+    a: Tensor,
+    kernel_size: [number, number],
+    stride: [number, number]
+  ): Tensor {
+    const [batch, channels, height, width] = a.shape;
+    const [kh, kw] = kernel_size;
+    const [sh, sw] = stride;
+
+    const out_height = Math.floor((height - kh) / sh + 1);
+    const out_width = Math.floor((width - kw) / sw + 1);
+    const outputData = new Array(batch)
+      .fill(0)
+      .map(() =>
+        new Array(channels)
+          .fill(0)
+          .map(() =>
+            new Array(out_height)
+              .fill(0)
+              .map(() => new Array(out_width).fill(0))
+          )
+      );
+
+    // Store max indices for backpropagation
+    const maxIndices = new Array(batch)
+      .fill(0)
+      .map(() =>
+        new Array(channels)
+          .fill(0)
+          .map(() =>
+            new Array(out_height)
+              .fill(0)
+              .map(() => new Array(out_width).fill([0, 0]))
+          )
+      );
+
+    // Perform max pooling operation using plain arrays
+    for (let b = 0; b < batch; b++) {
+      for (let c = 0; c < channels; c++) {
+        for (let i = 0; i < out_height; i++) {
+          for (let j = 0; j < out_width; j++) {
+            const h_start = i * sh;
+            const w_start = j * sw;
+            const h_end = h_start + kh;
+            const w_end = w_start + kw;
+
+            // Extract the region to pool
+            let max_val = -Infinity;
+            let max_idx = [0, 0];
+            for (let ki = h_start; ki < h_end; ki++) {
+              for (let kj = w_start; kj < w_end; kj++) {
+                if (ki >= 0 && ki < height && kj >= 0 && kj < width) {
+                  const val = a.data[b][c][ki][kj];
+                  if (val > max_val) {
+                    max_val = val;
+                    max_idx = [ki - h_start, kj - w_start]; // Store relative indices
+                  }
+                }
+              }
+            }
+
+            outputData[b][c][i][j] = max_val;
+            maxIndices[b][c][i][j] = max_idx; // Store indices relative to the window
+          }
+        }
+      }
+    }
+
+    // Create output tensor
+    this.cache = { x: a, maxIndices, kernel_size, stride };
+
+    const z = new Tensor(outputData, requiresGrad(a));
+    if (a instanceof Tensor && requiresGrad(a)) {
+      z.parents.push(a);
+      a.children.push(z);
+    }
+
+    z.operation = this;
+
+    return z;
+  }
+
+  backward(dz: Tensor, z: Tensor) {
+    const { x, maxIndices, kernel_size, stride } = this.cache;
+    const [kh, kw] = kernel_size;
+    const [sh, sw] = stride;
+    const [batch, channels, out_height, out_width] = dz.shape;
+
+    kh+kw;
+    // Initialize gradient tensor for input
+    const dx = new Array(batch)
+      .fill(0)
+      .map(() =>
+        new Array(channels)
+          .fill(0)
+          .map(() =>
+            new Array(x.shape[2])
+              .fill(0)
+              .map(() => new Array(x.shape[3]).fill(0))
+          )
+      );
+
+    // Propagate gradients based on stored max indices
+    for (let b = 0; b < batch; b++) {
+      for (let c = 0; c < channels; c++) {
+        for (let i = 0; i < out_height; i++) {
+          for (let j = 0; j < out_width; j++) {
+            const [h_idx, w_idx] = maxIndices[b][c][i][j];
+            const h_start = i * sh;
+            const w_start = j * sw;
+
+            // Assign gradient to the max index position
+            dx[b][c][h_start + h_idx][w_start + w_idx] += dz.data[b][c][i][j];
+          }
+        }
+      }
+    }
+
+    // Use the `backward()` call to propagate gradients further
+    if (x.requires_grad) {
+      const dxTensor = new Tensor(dx);
+      x.backward(dxTensor, z);
+    }
+  }
+}
+
+export class Img2Col {
+  cache: any;
+
+  forward(
+    a: Tensor,
+    kernel_height: number,
+    kernel_width: number,
+    stride: [number, number],
+    padding: [number, number]
+  ): Tensor {
+    this.cache = [a, kernel_height, kernel_width, stride, padding]; // Cache all relevant data
+
+    const [batch, channels, height, width] = a.shape;
+    const out_height =
+      Math.floor((height + 2 * padding[0] - kernel_height) / stride[0]) + 1;
+    const out_width =
+      Math.floor((width + 2 * padding[1] - kernel_width) / stride[1]) + 1;
+
+    const col_data = [];
+
+    for (let b = 0; b < batch; b++) {
+      for (let i = 0; i < out_height; i++) {
+        for (let j = 0; j < out_width; j++) {
+          const patch = [];
+          for (let c = 0; c < channels; c++) {
+            for (let kh = 0; kh < kernel_height; kh++) {
+              for (let kw = 0; kw < kernel_width; kw++) {
+                const h_idx = i * stride[0] - padding[0] + kh;
+                const w_idx = j * stride[1] - padding[1] + kw;
+                if (
+                  h_idx >= 0 &&
+                  h_idx < height &&
+                  w_idx >= 0 &&
+                  w_idx < width
+                ) {
+                  patch.push(a.data[b][c][h_idx][w_idx]);
+                } else {
+                  patch.push(0); // Zero-padding
+                }
+              }
+            }
+          }
+          col_data.push(patch);
+        }
+      }
+    }
+
+    const z = new Tensor(col_data, requiresGrad(a));
+    if (a instanceof Tensor && requiresGrad(a)) {
+      z.parents.push(a);
+      a.children.push(z);
+    }
+
+    z.operation = this;
+
+    return z;
+  }
+
+  backward(dz: Tensor, z: Tensor) {
+    const [a, kernel_height, kernel_width, stride, padding] = this.cache;
+    const [batch, channels, height, width] = a.shape;
+    const out_height =
+      Math.floor((height + 2 * padding[0] - kernel_height) / stride[0]) + 1;
+    const out_width =
+      Math.floor((width + 2 * padding[1] - kernel_width) / stride[1]) + 1;
+
+    // Initialize gradient tensor for dx with the same shape as input a
+    const dx = new Tensor(
+      new Array(batch)
+        .fill(0)
+        .map(() =>
+          new Array(channels)
+            .fill(0)
+            .map(() =>
+              new Array(height).fill(0).map(() => new Array(width).fill(0))
+            )
+        )
+    );
+
+    // Calculate the number of elements in each patch (channels * kernel_height * kernel_width)
+    // const patch_size = channels * kernel_height * kernel_width;
+
+    let col_index = 0;
+    for (let b = 0; b < batch; b++) {
+      for (let i = 0; i < out_height; i++) {
+        for (let j = 0; j < out_width; j++) {
+          // Extract the gradient patch for this output position
+          const gradient_patch = dz.data[col_index];
+          let patch_index = 0; // Index to iterate through the patch values
+
+          for (let c = 0; c < channels; c++) {
+            for (let kh = 0; kh < kernel_height; kh++) {
+              for (let kw = 0; kw < kernel_width; kw++) {
+                const h_idx = i * stride[0] - padding[0] + kh;
+                const w_idx = j * stride[1] - padding[1] + kw;
+
+                if (
+                  h_idx >= 0 &&
+                  h_idx < height &&
+                  w_idx >= 0 &&
+                  w_idx < width
+                ) {
+                  // Accumulate the gradient from the current patch position
+                  dx.data[b][c][h_idx][w_idx] += gradient_patch[patch_index];
+                }
+                patch_index++;
+              }
+            }
+          }
+
+          col_index++;
+        }
+      }
+    }
+    if (a.requires_grad) {
+      a.backward(dx, z);
+    }
+  }
+}
+
 // <<< Tensor Operation Aliases >>> //
 
 /**
@@ -1694,7 +2108,6 @@ function _div(a: Array<any> | number, b: Array<any> | number): any {
   }
 }
 
-
 function _matmul(a: Array<any>, b: Array<any>, kernel: any): Array<any> {
   if (typeof a === "number") {
     throw new Error("Cannot perform MatMul with given shapes.");
@@ -1704,12 +2117,12 @@ function _matmul(a: Array<any>, b: Array<any>, kernel: any): Array<any> {
     return a.map((element: Array<any>, idx: number) =>
       _matmul(element, b[idx], kernel)
     );
-  // If not, try to matmul:
+    // If not, try to matmul:
   } else {
     // If dimensions align, perform matmul:
     if (a[0].length === b.length && typeof a[0][0] === "number") {
       let out = kernel(a, b, b.length);
-      out = out.map((el:number[]) => Array.from(el));
+      out = out.map((el: number[]) => Array.from(el));
       return out;
     } else {
       throw Error(
@@ -1848,16 +2261,27 @@ function _masked_fill(
 // }
 
 export function _reshape(a: Array<any>, shape: number[]) {
-  if (getShape(a).reduce((a,b)=>a*b,1) != shape.reduce((a,b)=>a*b,1)) {throw new Error('Attempting to reshape into invalid shape.')}
-  function _build(a2: any[], shape2: number[], idx: number, numberOfEls: number): any[] {
+  if (
+    getShape(a).reduce((a, b) => a * b, 1) != shape.reduce((a, b) => a * b, 1)
+  ) {
+    throw new Error("Attempting to reshape into invalid shape.");
+  }
+  function _build(
+    a2: any[],
+    shape2: number[],
+    idx: number,
+    numberOfEls: number
+  ): any[] {
     if (shape2.length > 1) {
       const emptyArray = Array(shape2[0]).fill(0);
       let offSet = idx;
-      numberOfEls = (numberOfEls / shape2[0]);
-      const myArray = emptyArray.map((_, idx) => _build(a2, shape2.slice(1), offSet + idx*numberOfEls, numberOfEls));
+      numberOfEls = numberOfEls / shape2[0];
+      const myArray = emptyArray.map((_, idx) =>
+        _build(a2, shape2.slice(1), offSet + idx * numberOfEls, numberOfEls)
+      );
       return myArray;
     } else {
-      const myArray =  a2.slice(idx,idx+numberOfEls);
+      const myArray = a2.slice(idx, idx + numberOfEls);
       return myArray;
     }
   }
@@ -1895,7 +2319,11 @@ function _tensorInitializer(
  * @param {string} device - Device to store Tensor. Either "gpu" or "cpu".
  * @returns {object} New tensor.
  */
-export function tensor(data: Array<any>, requires_grad = false, device = 'cpu'): Tensor {
+export function tensor(
+  data: Array<any>,
+  requires_grad = false,
+  device = "cpu"
+): Tensor {
   return new Tensor(data, requires_grad, device);
 }
 
@@ -1906,7 +2334,11 @@ export function tensor(data: Array<any>, requires_grad = false, device = 'cpu'):
  * @param {string} device - Device to store Tensor. Either "gpu" or "cpu".
  * @returns {object} New tensor.
  */
-export function zeros(shape: Array<number>, requires_grad = false, device = 'cpu'): Tensor {
+export function zeros(
+  shape: Array<number>,
+  requires_grad = false,
+  device = "cpu"
+): Tensor {
   return new Tensor(
     _tensorInitializer(shape, () => 0),
     requires_grad,
@@ -1921,7 +2353,11 @@ export function zeros(shape: Array<number>, requires_grad = false, device = 'cpu
  * @param {string} device - Device to store Tensor. Either "gpu" or "cpu".
  * @returns {object} New tensor.
  */
-export function ones(shape: Array<number>, requires_grad = false, device = 'cpu'): Tensor {
+export function ones(
+  shape: Array<number>,
+  requires_grad = false,
+  device = "cpu"
+): Tensor {
   return new Tensor(
     _tensorInitializer(shape, () => 1),
     requires_grad,
@@ -1936,7 +2372,11 @@ export function ones(shape: Array<number>, requires_grad = false, device = 'cpu'
  * @param {string} device - Device to store Tensor. Either "gpu" or "cpu".
  * @returns {object} New tensor.
  */
-export function tril(shape: Array<number>, requires_grad = false, device = 'cpu'): Tensor {
+export function tril(
+  shape: Array<number>,
+  requires_grad = false,
+  device = "cpu"
+): Tensor {
   const z = ones(shape, requires_grad);
   for (let i = 0; i < shape[0]; i++) {
     for (let j = 0; j < shape[0]; j++) {
@@ -1956,7 +2396,11 @@ export function tril(shape: Array<number>, requires_grad = false, device = 'cpu'
  * @param {string} device - Device to store Tensor. Either "gpu" or "cpu".
  * @returns {object} New tensor.
  */
-export function rand(shape: Array<number>, requires_grad = false, device = 'cpu'): Tensor {
+export function rand(
+  shape: Array<number>,
+  requires_grad = false,
+  device = "cpu"
+): Tensor {
   return new Tensor(
     _tensorInitializer(shape, () => Math.random()),
     requires_grad,
@@ -1975,13 +2419,13 @@ export function rand(shape: Array<number>, requires_grad = false, device = 'cpu'
 export function randn(
   shape: Array<number>,
   requires_grad = false,
-  device = 'cpu',
+  device = "cpu",
   xavier = false
 ): Tensor {
   return new Tensor(
     _tensorInitializer(shape, () => {
       const mean = Math.random() * 0.98 + 1e-3;
-      const variance = Math.random() * 0.98 + 1e-3;;
+      const variance = Math.random() * 0.98 + 1e-3;
       const num =
         Math.sqrt(-2.0 * Math.log(mean)) * Math.cos(2.0 * Math.PI * variance);
       if (xavier) {
@@ -2189,4 +2633,79 @@ export function broadcastUp(
     inElement = _broadcastUp(inElement, outElement);
   }
   return inElement;
+}
+
+/**
+ * Returns the indices of the maximum values along a specified dimension
+ * 
+ * @param input - Input tensor
+ * @param dim - The dimension to reduce. Default is -1 (last dimension)
+ * @param keepdim - Whether the output tensor has dim retained or not. Default is false
+ * @returns Tensor containing the indices of the maximum values
+ */
+export function argmax(input: Tensor, dim: number = -1, keepdim: boolean = false): Tensor {
+  const actualDim = dim < 0 ? input.shape.length + dim : dim; //dim of -1
+  if (actualDim < 0 || actualDim >= input.shape.length) {
+    throw new Error(`Dimension out of range (expected to be in range of [${-input.shape.length}, ${input.shape.length-1}], but got ${dim})`);
+  }
+  
+  const outputShape = [...input.shape]; //different based on whether to keep dim or no
+  if (!keepdim) {
+    outputShape.splice(actualDim, 1);
+  } else {
+    outputShape[actualDim] = 1;
+  }
+  
+  const result = new Tensor(outputShape, false, input.device);
+  
+  function processSlice(data: any, indices: number[] = [], depth: number = 0): any {
+    
+    if (depth === actualDim) {
+      // If reached the target dimension, find the max index in this slice
+      let maxIndex = 0;
+      let maxValue = data[0];
+      
+      for (let i = 1; i < data.length; i++) {
+        if (data[i] > maxValue) {
+          maxValue = data[i];
+          maxIndex = i;
+        }
+      }
+      return maxIndex;
+    }
+    
+    if (!Array.isArray(data)) {
+      return data; // If at a leaf node but not target dimension
+    }
+    
+    const results = [];
+    for (let i = 0; i < data.length; i++) {
+      const newIndices = [...indices, i];
+      const sliceResult = processSlice(data[i], newIndices, depth + 1);
+      results.push(sliceResult);
+    }
+    
+    return results;
+  }
+  
+  let resultData = processSlice(input.data); // Process the data
+  
+  if (keepdim) {
+    function addDimension(data: any, dim: number, currentDim: number = 0): any {
+      if (!Array.isArray(data)) {
+        return dim === currentDim ? [data] : data;
+      }
+      
+      if (dim === currentDim) {
+        return [data];
+      }
+      
+      return data.map(item => addDimension(item, dim, currentDim + 1));
+    }
+    resultData = addDimension(resultData, actualDim);
+  }
+  
+  result._data = resultData; //TODO: Check if this is writable
+  
+  return result;
 }

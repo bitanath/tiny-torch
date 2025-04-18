@@ -1,5 +1,5 @@
-﻿import { Tensor } from "./tensor";
-import NestedArray from "./types/utils.types";
+﻿import { Tensor } from "./tensor.js";
+import NestedArray from "./types/utils.types.js";
 
 /**
  * Recursively gets the shape (length of every dimension) of the Tensor.

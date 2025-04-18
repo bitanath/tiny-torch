@@ -24,6 +24,7 @@
   tril,
   ones,
   zeros,
+  argmax,
   broadcast
 } from "./tensor.js";
 import {
@@ -45,8 +46,9 @@ import {
 } from "./layers.js";
 import { Adam } from "./optim.js";
 import { getShape } from "./utils.js";
+import { SimpleRNN,Transformer } from "./models.js";
 
-const nn = {
+export const nn = {
   Module,
   Linear,
   MultiHeadSelfAttention,
@@ -60,9 +62,11 @@ const nn = {
   LayerNorm,
   CrossEntropyLoss,
   MSELoss
-};
+}
 
-const optim = { Adam };
+const optim = { Adam }
+
+const models = {SimpleRNN,Transformer}
 
 export const torch = {
   // Add methods from tensor.js (these methods are accessed with "torch."):
@@ -91,10 +95,12 @@ export const torch = {
   tril,
   ones,
   zeros,
+  argmax,
   broadcast,
   save,
   load,
   // Add submodules:
+  models,
   nn,
   optim,
   getShape

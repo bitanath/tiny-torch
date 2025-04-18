@@ -199,6 +199,102 @@ class Tensor {
     return this._data;
   }
   /**
+   * Returns a single element tensor into a js number
+   */
+  item() {
+    if (this._data.length !== 1) {
+      throw new Error("item() can only be called on tensors with a single element");
+    }
+    return this._data[0];
+  }
+  /**
+   * Removes dimensions of size 1 from the tensor.
+   * 
+   * @param dim Optional dimension to squeeze. If specified, only squeezes the dimension if it's 1.
+   * If not specified, squeezes all dimensions of size 1.
+   * @returns A new tensor with selected dimensions of size 1 removed
+   */
+  squeeze(dim) {
+    const newShape = [...this.shape];
+    if (dim !== void 0) {
+      const actualDim = dim < 0 ? this.shape.length + dim : dim;
+      if (actualDim < 0 || actualDim >= this.shape.length) {
+        throw new Error(`Dimension out of range (expected to be in range of [${-this.shape.length}, ${this.shape.length - 1}], but got ${dim})`);
+      }
+      if (this.shape[actualDim] === 1) {
+        newShape.splice(actualDim, 1);
+      }
+    } else {
+      for (let i = newShape.length - 1; i >= 0; i--) {
+        if (newShape[i] === 1) {
+          newShape.splice(i, 1);
+        }
+      }
+    }
+    const newTensor = new Tensor([...this._data], this.requires_grad, this.device);
+    newTensor.shape = newShape;
+    return newTensor;
+  }
+  /**
+   * Returns a new tensor with a dimension of size one inserted at the specified position.
+   * 
+   * @param dim The index at which to insert the singleton dimension
+   * @returns A new tensor with an additional dimension
+   */
+  unsqueeze(dim) {
+    const newShape = [...this.shape];
+    const actualDim = dim < 0 ? this.shape.length + dim + 1 : dim;
+    if (actualDim < 0 || actualDim > this.shape.length) {
+      throw new Error(`Dimension out of range (expected to be in range of [${-this.shape.length - 1}, ${this.shape.length}], but got ${dim})`);
+    }
+    newShape.splice(actualDim, 0, 1);
+    const newTensor = new Tensor([...this._data], this.requires_grad, this.device);
+    newTensor.shape = newShape;
+    return newTensor;
+  }
+  slice(indices) {
+    function extractSlice(data, currentDim) {
+      if (!Array.isArray(data) || currentDim >= indices.length) {
+        return data;
+      }
+      const index = indices[currentDim];
+      if (index === null) {
+        return data.map((item) => extractSlice(item, currentDim + 1));
+      } else {
+        return extractSlice(data[index], currentDim + 1);
+      }
+    }
+    const slicedData = extractSlice(this._data, 0);
+    return new Tensor(slicedData, this.requires_grad, this.device);
+  }
+  setSlice(indices, value) {
+    function setSliceValues(data, valueData2, currentDim) {
+      if (!Array.isArray(data) || currentDim >= indices.length) {
+        return;
+      }
+      const index = indices[currentDim];
+      if (index === null) {
+        for (let i = 0; i < data.length; i++) {
+          const nextValueData = Array.isArray(valueData2) && valueData2.length > i ? valueData2[i] : valueData2;
+          if (currentDim === indices.length - 1) {
+            data[i] = Array.isArray(nextValueData) ? [...nextValueData] : nextValueData;
+          } else {
+            setSliceValues(data[i], nextValueData, currentDim + 1);
+          }
+        }
+      } else {
+        if (currentDim === indices.length - 1) {
+          data[index] = Array.isArray(valueData2) ? [...valueData2] : valueData2;
+        } else {
+          setSliceValues(data[index], valueData2, currentDim + 1);
+        }
+      }
+    }
+    const valueData = value instanceof Tensor ? value._data : value;
+    setSliceValues(this._data, valueData, 0);
+    return this;
+  }
+  /**
    * Gets the sum of the Tensor over a specified dimension.
    * @param {number} dim - Dimension to sum over.
    * @param {boolean} keepdims - Whether to keep dimensions of original tensor.
@@ -296,7 +392,9 @@ class Tensor {
         if (other.batch_size != null) {
           other.batch_size = other.shape.at(-2);
           if (other.warned === false) {
-            console.warn("Testing batch size different from training batch size. JS-PyTorch recreating GPU Kernel (Less efficient)");
+            console.warn(
+              "Testing batch size different from training batch size. JS-PyTorch recreating GPU Kernel (Less efficient)"
+            );
             other.warned = true;
           }
         }
@@ -423,6 +521,21 @@ class Tensor {
   reshape(shape) {
     const operation = new Reshape();
     return operation.forward(this, shape);
+  }
+  //TODO: Utility functions for Conv2D / MaxPool from the MR by TaylorHawkes bd9f840574ba1564919b27685f2427de4c688ab2
+  img2col(kernel_height, kernel_width, stride, padding) {
+    const operation = new Img2Col();
+    return operation.forward(
+      this,
+      kernel_height,
+      kernel_width,
+      stride,
+      padding
+    );
+  }
+  maxpool(kernel_size, stride) {
+    const operation = new MaxPool();
+    return operation.forward(this, kernel_size, stride);
   }
 }
 class Parameter extends Tensor {
@@ -1027,6 +1140,163 @@ class Reshape {
     }
   }
 }
+class MaxPool {
+  cache;
+  forward(a, kernel_size, stride) {
+    const [batch, channels, height, width] = a.shape;
+    const [kh, kw] = kernel_size;
+    const [sh, sw] = stride;
+    const out_height = Math.floor((height - kh) / sh + 1);
+    const out_width = Math.floor((width - kw) / sw + 1);
+    const outputData = new Array(batch).fill(0).map(
+      () => new Array(channels).fill(0).map(
+        () => new Array(out_height).fill(0).map(() => new Array(out_width).fill(0))
+      )
+    );
+    const maxIndices = new Array(batch).fill(0).map(
+      () => new Array(channels).fill(0).map(
+        () => new Array(out_height).fill(0).map(() => new Array(out_width).fill([0, 0]))
+      )
+    );
+    for (let b = 0; b < batch; b++) {
+      for (let c = 0; c < channels; c++) {
+        for (let i = 0; i < out_height; i++) {
+          for (let j = 0; j < out_width; j++) {
+            const h_start = i * sh;
+            const w_start = j * sw;
+            const h_end = h_start + kh;
+            const w_end = w_start + kw;
+            let max_val = -Infinity;
+            let max_idx = [0, 0];
+            for (let ki = h_start; ki < h_end; ki++) {
+              for (let kj = w_start; kj < w_end; kj++) {
+                if (ki >= 0 && ki < height && kj >= 0 && kj < width) {
+                  const val = a.data[b][c][ki][kj];
+                  if (val > max_val) {
+                    max_val = val;
+                    max_idx = [ki - h_start, kj - w_start];
+                  }
+                }
+              }
+            }
+            outputData[b][c][i][j] = max_val;
+            maxIndices[b][c][i][j] = max_idx;
+          }
+        }
+      }
+    }
+    this.cache = { x: a, maxIndices, kernel_size, stride };
+    const z = new Tensor(outputData, requiresGrad(a));
+    if (a instanceof Tensor && requiresGrad(a)) {
+      z.parents.push(a);
+      a.children.push(z);
+    }
+    z.operation = this;
+    return z;
+  }
+  backward(dz, z) {
+    const { x, maxIndices, kernel_size, stride } = this.cache;
+    const [sh, sw] = stride;
+    const [batch, channels, out_height, out_width] = dz.shape;
+    const dx = new Array(batch).fill(0).map(
+      () => new Array(channels).fill(0).map(
+        () => new Array(x.shape[2]).fill(0).map(() => new Array(x.shape[3]).fill(0))
+      )
+    );
+    for (let b = 0; b < batch; b++) {
+      for (let c = 0; c < channels; c++) {
+        for (let i = 0; i < out_height; i++) {
+          for (let j = 0; j < out_width; j++) {
+            const [h_idx, w_idx] = maxIndices[b][c][i][j];
+            const h_start = i * sh;
+            const w_start = j * sw;
+            dx[b][c][h_start + h_idx][w_start + w_idx] += dz.data[b][c][i][j];
+          }
+        }
+      }
+    }
+    if (x.requires_grad) {
+      const dxTensor = new Tensor(dx);
+      x.backward(dxTensor, z);
+    }
+  }
+}
+class Img2Col {
+  cache;
+  forward(a, kernel_height, kernel_width, stride, padding) {
+    this.cache = [a, kernel_height, kernel_width, stride, padding];
+    const [batch, channels, height, width] = a.shape;
+    const out_height = Math.floor((height + 2 * padding[0] - kernel_height) / stride[0]) + 1;
+    const out_width = Math.floor((width + 2 * padding[1] - kernel_width) / stride[1]) + 1;
+    const col_data = [];
+    for (let b = 0; b < batch; b++) {
+      for (let i = 0; i < out_height; i++) {
+        for (let j = 0; j < out_width; j++) {
+          const patch = [];
+          for (let c = 0; c < channels; c++) {
+            for (let kh = 0; kh < kernel_height; kh++) {
+              for (let kw = 0; kw < kernel_width; kw++) {
+                const h_idx = i * stride[0] - padding[0] + kh;
+                const w_idx = j * stride[1] - padding[1] + kw;
+                if (h_idx >= 0 && h_idx < height && w_idx >= 0 && w_idx < width) {
+                  patch.push(a.data[b][c][h_idx][w_idx]);
+                } else {
+                  patch.push(0);
+                }
+              }
+            }
+          }
+          col_data.push(patch);
+        }
+      }
+    }
+    const z = new Tensor(col_data, requiresGrad(a));
+    if (a instanceof Tensor && requiresGrad(a)) {
+      z.parents.push(a);
+      a.children.push(z);
+    }
+    z.operation = this;
+    return z;
+  }
+  backward(dz, z) {
+    const [a, kernel_height, kernel_width, stride, padding] = this.cache;
+    const [batch, channels, height, width] = a.shape;
+    const out_height = Math.floor((height + 2 * padding[0] - kernel_height) / stride[0]) + 1;
+    const out_width = Math.floor((width + 2 * padding[1] - kernel_width) / stride[1]) + 1;
+    const dx = new Tensor(
+      new Array(batch).fill(0).map(
+        () => new Array(channels).fill(0).map(
+          () => new Array(height).fill(0).map(() => new Array(width).fill(0))
+        )
+      )
+    );
+    let col_index = 0;
+    for (let b = 0; b < batch; b++) {
+      for (let i = 0; i < out_height; i++) {
+        for (let j = 0; j < out_width; j++) {
+          const gradient_patch = dz.data[col_index];
+          let patch_index = 0;
+          for (let c = 0; c < channels; c++) {
+            for (let kh = 0; kh < kernel_height; kh++) {
+              for (let kw = 0; kw < kernel_width; kw++) {
+                const h_idx = i * stride[0] - padding[0] + kh;
+                const w_idx = j * stride[1] - padding[1] + kw;
+                if (h_idx >= 0 && h_idx < height && w_idx >= 0 && w_idx < width) {
+                  dx.data[b][c][h_idx][w_idx] += gradient_patch[patch_index];
+                }
+                patch_index++;
+              }
+            }
+          }
+          col_index++;
+        }
+      }
+    }
+    if (a.requires_grad) {
+      a.backward(dx, z);
+    }
+  }
+}
 function mean(a, dim = -1, keepdims = false) {
   return a.mean(dim, keepdims);
 }
@@ -1371,7 +1641,9 @@ function _reshape(a, shape) {
       const emptyArray = Array(shape2[0]).fill(0);
       let offSet = idx;
       numberOfEls = numberOfEls / shape2[0];
-      const myArray = emptyArray.map((_, idx2) => _build(a2, shape2.slice(1), offSet + idx2 * numberOfEls, numberOfEls));
+      const myArray = emptyArray.map(
+        (_, idx2) => _build(a2, shape2.slice(1), offSet + idx2 * numberOfEls, numberOfEls)
+      );
       return myArray;
     } else {
       const myArray = a2.slice(idx, idx + numberOfEls);
@@ -1551,6 +1823,57 @@ function broadcastUp(inElement, outElement) {
     inElement = _broadcastUp(inElement, outElement);
   }
   return inElement;
+}
+function argmax(input, dim = -1, keepdim = false) {
+  const actualDim = dim < 0 ? input.shape.length + dim : dim;
+  if (actualDim < 0 || actualDim >= input.shape.length) {
+    throw new Error(`Dimension out of range (expected to be in range of [${-input.shape.length}, ${input.shape.length - 1}], but got ${dim})`);
+  }
+  const outputShape = [...input.shape];
+  if (!keepdim) {
+    outputShape.splice(actualDim, 1);
+  } else {
+    outputShape[actualDim] = 1;
+  }
+  const result = new Tensor(outputShape, false, input.device);
+  function processSlice(data, indices = [], depth = 0) {
+    if (depth === actualDim) {
+      let maxIndex = 0;
+      let maxValue = data[0];
+      for (let i = 1; i < data.length; i++) {
+        if (data[i] > maxValue) {
+          maxValue = data[i];
+          maxIndex = i;
+        }
+      }
+      return maxIndex;
+    }
+    if (!Array.isArray(data)) {
+      return data;
+    }
+    const results = [];
+    for (let i = 0; i < data.length; i++) {
+      const newIndices = [...indices, i];
+      const sliceResult = processSlice(data[i], newIndices, depth + 1);
+      results.push(sliceResult);
+    }
+    return results;
+  }
+  let resultData = processSlice(input.data);
+  if (keepdim) {
+    let addDimension2 = function(data, dim2, currentDim = 0) {
+      if (!Array.isArray(data)) {
+        return dim2 === currentDim ? [data] : data;
+      }
+      if (dim2 === currentDim) {
+        return [data];
+      }
+      return data.map((item) => addDimension2(item, dim2, currentDim + 1));
+    };
+    resultData = addDimension2(resultData, actualDim);
+  }
+  result._data = resultData;
+  return result;
 }
 
 class Module {
@@ -1999,8 +2322,8 @@ function save(model, file) {
     }
     return result;
   }
-  const data = JSON.stringify(recursiveReplacer(model));
-  fs.writeFileSync(file, data);
+  const replaced = recursiveReplacer(model);
+  return replaced;
 }
 function load(model, file) {
   const loadedData = fs.readFileSync(file);
@@ -2073,6 +2396,203 @@ class Adam {
   }
 }
 
+function tanh(x) {
+  function _tanh(x2) {
+    if (typeof x2[0] === "number") {
+      return x2.map((el) => {
+        const exp_x = Math.exp(el);
+        const exp_neg_x = Math.exp(-el);
+        return (exp_x - exp_neg_x) / (exp_x + exp_neg_x);
+      });
+    } else if (typeof x2[0] === "object") {
+      return x2.map((el) => _tanh(el));
+    } else {
+      throw Error("In tanh, provided Tensor is not homogenous.");
+    }
+  }
+  const tensor = new Tensor(_tanh(x._data), x.requires_grad, x.device);
+  return tensor;
+}
+function _calculate_fan_in_and_fan_out(shape) {
+  if (shape.length < 2) {
+    throw new Error("Tensor must have at least 2 dimensions for fan in/out calculation");
+  }
+  let fanIn;
+  let fanOut;
+  if (shape.length === 2) {
+    fanIn = shape[1];
+    fanOut = shape[0];
+  } else {
+    const receptiveFieldSize = shape.slice(2).reduce((a, b) => a * b, 1);
+    fanIn = shape[1] * receptiveFieldSize;
+    fanOut = shape[0] * receptiveFieldSize;
+  }
+  return { fanIn, fanOut };
+}
+function xavier_normal_(tensor, gain = 1) {
+  const randomNormal = (mean = 0, std2 = 1) => {
+    const u1 = Math.random();
+    const u2 = Math.random();
+    const z0 = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    return mean + z0 * std2;
+  };
+  const fillTensorData = (data, std2) => {
+    if (Array.isArray(data)) {
+      return data.map((item) => fillTensorData(item, std2));
+    } else {
+      return randomNormal(0, std2);
+    }
+  };
+  const { fanIn, fanOut } = _calculate_fan_in_and_fan_out(tensor.shape);
+  const std = gain * Math.sqrt(2 / (fanIn + fanOut));
+  const newData = fillTensorData(tensor.data, std);
+  const newTensor = new Tensor(newData, tensor.requires_grad, tensor.device);
+  return newTensor;
+}
+function uniform_(tensor, a = 0, b = 1) {
+  const randomUniform = () => {
+    return a + Math.random() * (b - a);
+  };
+  const createNewData = (data) => {
+    if (Array.isArray(data)) {
+      return data.map((item) => createNewData(item));
+    } else {
+      return randomUniform();
+    }
+  };
+  const newData = createNewData(tensor.data);
+  const newTensor = new Tensor(newData, tensor.requires_grad, tensor.device);
+  return newTensor;
+}
+function kaiming_uniform_(tensor, a = Math.sqrt(5), mode = "fan_in", nonlinearity = "leaky_relu") {
+  let gain;
+  if (nonlinearity === "leaky_relu") {
+    gain = Math.sqrt(2 / (1 + a * a));
+  } else if (nonlinearity === "relu") {
+    gain = Math.sqrt(2);
+  } else if (nonlinearity === "tanh") {
+    gain = 5 / 3;
+  } else {
+    gain = 1;
+  }
+  const { fanIn, fanOut } = _calculate_fan_in_and_fan_out(tensor.shape);
+  const fan = mode === "fan_in" ? fanIn : fanOut;
+  const bound = gain * Math.sqrt(3 / fan);
+  return uniform_(tensor, -bound, bound);
+}
+function zeros_(shape) {
+  if (shape.length === 1) {
+    return Array(shape[0]).fill(0);
+  }
+  return Array(shape[0]).fill(0).map(
+    () => zeros_(shape.slice(1))
+  );
+}
+
+class RecurrentLayer extends Module {
+  W_ih;
+  // Input-to-hidden weights
+  W_hh;
+  // Hidden-to-hidden weights
+  b_ih;
+  // Input-to-hidden bias
+  b_hh;
+  // Hidden-to-hidden bias
+  constructor(input_size, hidden_size, nonlinearity = "tanh") {
+    super();
+    this.input_size = input_size;
+    this.hidden_size = hidden_size;
+    this.nonlinearity = nonlinearity;
+    this.W_ih = new Parameter(zeros_([hidden_size, input_size]));
+    this.W_hh = new Parameter(zeros_([hidden_size, hidden_size]));
+    this.b_ih = new Parameter(zeros_([hidden_size]));
+    this.b_hh = new Parameter(zeros_([hidden_size]));
+  }
+  reset_parameters() {
+    this.W_ih = kaiming_uniform_(this.W_ih, Math.sqrt(5));
+    this.W_hh = kaiming_uniform_(this.W_hh, Math.sqrt(5));
+    const { fanIn } = _calculate_fan_in_and_fan_out([this.hidden_size, this.input_size]);
+    const bound = fanIn > 0 ? 1 / Math.sqrt(fanIn) : 0;
+    this.b_ih = uniform_(this.b_ih, -bound, bound);
+    this.b_hh = uniform_(this.b_hh, -bound, bound);
+  }
+  linear(x_t, weight, bias) {
+    const output = x_t.matmul(transpose(weight, 0, 1));
+    if (bias !== null) {
+      return add(output, bias);
+    }
+    return output;
+  }
+  /**
+   * Forward pass of the recurrent layer
+   * @param x - Input tensor of shape [batch_size, seq_len, input_size]
+   * @param h_0 - Optional initial hidden state of shape [batch_size, hidden_size]
+   * @returns Tuple of [output, h_n] where:
+   *          - output is of shape [batch_size, seq_len, hidden_size]
+   *          - h_n is the final hidden state of shape [batch_size, hidden_size]
+   */
+  forward(x, h_0) {
+    const shape = x.shape;
+    const batch_size = shape[0];
+    const seq_len = shape[1];
+    let h_t;
+    if (!h_0) {
+      h_t = zeros([batch_size, this.hidden_size], x.requires_grad, x.device);
+    } else {
+      h_t = h_0;
+    }
+    const output = zeros([batch_size, seq_len, this.hidden_size], x.requires_grad, x.device);
+    for (let t = 0; t < seq_len; t++) {
+      const x_t = x.slice([null, t, null]);
+      const input_projection = this.linear(x_t, this.W_ih, this.b_ih);
+      const hidden_projection = this.linear(h_t, this.W_hh, this.b_hh);
+      const combined = input_projection.add(hidden_projection);
+      h_t = tanh(combined);
+      output.setSlice([null, t, null], h_t);
+    }
+    return [output, h_t];
+  }
+}
+class SimpleRNN extends Module {
+  embed;
+  rnn;
+  dense;
+  constructor(vocab_size = 27, embedding_dim = 256, hidden_layers = 320) {
+    super();
+    this.embed = new Embedding(vocab_size, embedding_dim);
+    this.rnn = new RecurrentLayer(embedding_dim, hidden_layers);
+    this.dense = new Linear(hidden_layers, vocab_size);
+    this.dense.W = xavier_normal_(this.dense.W);
+    this.embed.E = xavier_normal_(this.embed.E);
+  }
+  forward(x) {
+    const embedded = this.embed.forward(x);
+    let [out, _] = this.rnn.forward(embedded);
+    out = this.dense.forward(out.slice([null, out.shape[1] - 1, null]));
+    return out;
+  }
+}
+class Transformer extends Module {
+  constructor(vocab_size = 27, hidden_size = 64, n_timesteps = 16, n_heads = 4, dropout_p = 0.2, device = "cpu") {
+    super();
+    this.embed = new Embedding(vocab_size, hidden_size);
+    this.pos_embed = new PositionalEmbedding(n_timesteps, hidden_size);
+    this.b1 = new Block(hidden_size, hidden_size, n_heads, n_timesteps, dropout_p, device);
+    this.b2 = new Block(hidden_size, hidden_size, n_heads, n_timesteps, dropout_p, device);
+    this.ln = new LayerNorm(hidden_size);
+    this.linear = new Linear(hidden_size, vocab_size, device);
+  }
+  forward(x) {
+    let z;
+    z = add(this.embed.forward(x), this.pos_embed.forward(x));
+    z = this.b1.forward(z);
+    z = this.b2.forward(z);
+    z = this.ln.forward(z);
+    z = this.linear.forward(z);
+    return z;
+  }
+}
+
 const nn = {
   Module,
   Linear,
@@ -2089,6 +2609,7 @@ const nn = {
   MSELoss
 };
 const optim = { Adam };
+const models = { SimpleRNN, Transformer };
 const torch = {
   // Add methods from tensor.js (these methods are accessed with "torch."):
   Tensor,
@@ -2116,13 +2637,15 @@ const torch = {
   tril,
   ones,
   zeros,
+  argmax,
   broadcast,
   save,
   load,
   // Add submodules:
+  models,
   nn,
   optim,
   getShape
 };
 
-export { torch };
+export { nn, torch };

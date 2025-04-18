@@ -13,8 +13,7 @@
   mul,
   log,
   _reshape
-} from "./tensor";
-import fs from 'fs';
+} from "./tensor.js";
 
 
 // Interface that contains all the types of Module's attributes:
@@ -410,6 +409,41 @@ export class ReLU extends Module {
   }
 }
 
+export class Tanh extends Module {
+  /**
+   * Hyperbolic Tangent nonlinearity. 
+   * Applies the tanh function element-wise: tanh(x) = (e^x - e^-x) / (e^x + e^-x)
+   */
+  constructor() {
+    super();
+  }
+
+  /**
+   * Performs forward pass through Hyperbolic Tangent nonlinearity.
+   * @param {Tensor} x - input Tensor.
+   * @returns {Tensor} new Tensor.
+   */
+  forward(x: Tensor): Tensor {
+    function _tanh(x: Array<any>): Array<any> {
+      if (typeof x[0] === "number") {
+        return x.map((el: number): number => {
+          // tanh(x) = (e^x - e^-x) / (e^x + e^-x)
+          const exp_x = Math.exp(el);
+          const exp_neg_x = Math.exp(-el);
+          return (exp_x - exp_neg_x) / (exp_x + exp_neg_x);
+        });
+      } else if (typeof x[0] === "object") {
+        return x.map((el: Array<any>): Array<any> => _tanh(el));
+      } else {
+        throw Error("In Tanh, provided Tensor is not homogenous.");
+      }
+    }
+    
+    return tensor(_tanh(x._data));
+  }
+}
+
+
 export class Softmax extends Module {
   /**
    * Softmax nonlinearity class. Returns distribution of values (sum=1).
@@ -490,6 +524,78 @@ export class LayerNorm extends Module {
     const norm_x = x.sub(x.mean(-1, true)).div(sqrt(var_x)); // (B, T, D)
     const z = mul(norm_x, this.gamma).add(this.beta); // (B, T, D)
     return z;
+  }
+}
+
+// Additional layers - Conv2d and MaxPool for them ConvNets
+export class Conv2D extends Module {
+  constructor(
+    in_channels:number, out_channels:number, kernel_size:number, stride = 1, padding = "same",
+    dilation = 1, groups = 1, bias = true, device = "cpu"
+  ) {
+    super();
+
+    const [kh, kw] = Array.isArray(kernel_size) ? kernel_size : [kernel_size, kernel_size];
+    const [sh, sw] = Array.isArray(stride) ? stride : [stride, stride];
+    const [dh, dw] = Array.isArray(dilation) ? dilation : [dilation, dilation];
+
+    let ph, pw;
+    if (padding === "same") {
+      ph = Math.floor(((kh - 1) * dh + 1 - sh) / 2);
+      pw = Math.floor(((kw - 1) * dw + 1 - sw) / 2);
+    } else if (Array.isArray(padding)) {
+      [ph, pw] = padding;
+    } else {
+      ph = pw = padding;
+    }
+
+    const weight_shape = [out_channels, Math.floor(in_channels / groups), kh, kw];
+    this.W = randn(weight_shape, true, device, false);
+    this.b = bias ? zeros([out_channels], true) : null;
+    this.has_bias = bias;
+
+    this.stride = [sh, sw];
+    this.padding = [ph, pw];
+    this.dilation = [dh, dw];
+    this.groups = groups;
+  }
+
+  forward(x:Tensor):Tensor {
+    const [kernel_height, kernel_width] = [this.W.shape[2], this.W.shape[3]];
+    const [batch, out_channels] = [x.shape[0], this.W.shape[0]];
+    const out_height = Math.floor((x.shape[2] + 2 * this.padding[0] - kernel_height) / this.stride[0]) + 1;
+    const out_width = Math.floor((x.shape[3] + 2 * this.padding[1] - kernel_width) / this.stride[1]) + 1;
+
+
+    x = x.img2col(kernel_height, kernel_width, this.stride, this.padding);
+
+    let reshaped_weights = this.W.reshape([this.W.shape[0], this.W.shape[1] * kernel_height * kernel_width]).transpose(0, 1);
+
+    x = x.matmul(reshaped_weights);
+
+    x = x.reshape([batch, out_channels, out_height, out_width]);
+
+    if (this.has_bias && this.b) {
+      x = x.add(this.b);//not sure bias is working correctly
+    }
+
+    return x;
+  }
+}
+
+export class MaxPool2D extends Module {
+  public kernel_size: [number, number];
+  public stride: [number, number];
+
+  constructor(kernel_size: number | [number, number], stride?: number | [number, number]) {
+    super();
+    this.kernel_size = Array.isArray(kernel_size) ? kernel_size : [kernel_size, kernel_size];
+    this.stride = stride ? (Array.isArray(stride) ? stride : [stride, stride]) : this.kernel_size;
+  }
+
+  forward(x: Tensor): Tensor {
+      x=x.maxpool(this.kernel_size,this.stride);
+      return x;
   }
 }
 
@@ -575,11 +681,10 @@ export class MSELoss extends Module {
 }
 
 /**
- * Saves the model to a JSON file.
- * @param {Module} model - Model to be saved in JSON file.
- * @param {string} file - JSON file.
+ * Returns a JSON string representation of a model
+ * @param {Module} model - Model to be return a JSON representation of
  */
-export function save(model: Module, file: string) {
+export function save(model: Module):object {
   /**
    * Filters object, returning 'null' instead of 'value' for certain keys.
    * @param {object} obj - Objects with keys and values that we have to filter.
@@ -600,33 +705,21 @@ export function save(model: Module, file: string) {
     }
     return result 
   }
-  const data = JSON.stringify(recursiveReplacer(model));
-  fs.writeFileSync(file, data);
+  
+  const replaced = recursiveReplacer(model)
+  return replaced
+  
 }
 
 /**
  * Loads a model from a JSON file.
  * @param {Module} model - Blank model to load weights into (placeholder). Needs to be identical to model.
- * @param {string} file - JSON file.
+ * @param {Array} keys - A mapping of keys to load weights into.
  * @returns {Module} loadedModel - Model to be loaded from JSON file.
  */
-export function load(model: Module, file: string): Module {
-  const loadedData = fs.readFileSync(file);
-  let loadedModel = JSON.parse(loadedData.toString());
-  loadParameters(loadedModel, model)
-  return model;  
-}
-
-function loadParameters(source: Module, target: Module) {
-  for (const [key, value] of target.entries()) {
-    // Add every Module, Parameter or Tensor with requires_grad set to True:
-    if (value instanceof Module) {
-      loadParameters(source[key], target[key]);
-    } else if (value instanceof Parameter || value instanceof Tensor) {
-      target[key]._data = source[key]._data;
-      target[key].m = source[key].m;
-      target[key].v = source[key].v;
-
-    }
+export function load(model: Module,keys:Array<any>): Module {
+  for(const key in keys){
+    key+""
   }
+  return model
 }
